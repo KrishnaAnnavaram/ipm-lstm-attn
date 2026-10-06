@@ -1,0 +1,39 @@
+# Quick seeded ablation on a small synthetic QP set (about 10 minutes on a laptop CPU).
+name = "ablation_quick"
+
+[data]
+family = "qp"
+n_var = 10
+n_eq = 5
+n_ineq = 5
+n_instances = 240
+seed = 17
+val_frac = 0.1
+test_frac = 0.25
+split_seed = 0
+
+[ipm]
+outer_iters = 8
+
+[model]
+hidden_dim = 24
+d_model = 8
+heads = 2
+inner_steps = 8
+
+[train]
+epochs = 5
+batch_size = 16
+patience = 3
+
+[ablation]
+variants = ["lstm1", "lstm2", "lstm2_attn", "lstm2_mask", "lstm2_gnn"]
+seeds = [0, 1, 2]
+baseline = "lstm1"
+bootstrap = 2000
+
+[bench]
+warmup = 1
+repeats = 3
+batch_size = 16
+max_instances = 10

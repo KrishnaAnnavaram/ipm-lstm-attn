@@ -1,0 +1,51 @@
+# Upstream size: 100 variables, 50 equality and 50 inequality constraints. Needs hours on a CPU.
+name = "qp_100_50_50"
+
+[data]
+family = "qp"
+n_var = 100
+n_eq = 50
+n_ineq = 50
+n_instances = 10000
+seed = 17
+val_frac = 0.1
+test_frac = 0.1
+split_seed = 0
+
+[ipm]
+sigma = 0.1
+tau = 0.995
+outer_iters = 50
+precondition = true
+reference_tol = 1e-8
+reference_max_iter = 200
+warm_tol = 1e-6
+
+[model]
+variant = "lstm2_mask"
+hidden_dim = 32
+d_model = 16
+heads = 4
+dropout = 0.0
+inner_steps = 50
+
+[train]
+seed = 0
+epochs = 50
+batch_size = 32
+lr = 1e-3
+weight_decay = 0.0
+patience = 5
+grad_clip = 1.0
+
+[ablation]
+variants = ["lstm1", "lstm2", "lstm2_attn", "lstm2_mask", "lstm2_gnn"]
+seeds = [0, 1, 2, 3, 4]
+baseline = "lstm1"
+bootstrap = 2000
+
+[bench]
+warmup = 2
+repeats = 5
+batch_size = 32
+max_instances = 20
