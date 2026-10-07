@@ -9,7 +9,7 @@
 ![Families](https://img.shields.io/badge/Problem_families-3-1F3864?style=for-the-badge)
 ![Variants](https://img.shields.io/badge/Learned_variants-5-2E5FD9?style=for-the-badge)
 ![Solvers](https://img.shields.io/badge/Newton_solvers-direct_%7C_CG_%7C_learned-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-66_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-50_passing_in_CI-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -101,7 +101,7 @@ ipm-lstm-attn gives each of these questions its own component. The same code pat
 | Providers | PyTorch (learned solvers), IPOPT through `cyipopt` (warm-start back-end), matplotlib (plots). All optional |
 | Offline mode | Everything. No command downloads data or needs a key |
 | Safety | Strict config keys, immutable datasets with SHA-256 checks, one seed for every random number generator |
-| Tests | **66** unit tests (`pytest`). 16 of them need torch and skip in CI |
+| Tests | **66** unit tests (`pytest`): 50 pass in CI, 16 skip without `torch` (all 66 pass with the `torch` extra) |
 
 ```mermaid
 flowchart LR
