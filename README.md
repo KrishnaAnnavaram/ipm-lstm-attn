@@ -66,6 +66,7 @@ This README is the **one location that explains all of ipm-lstm-attn**. It gives
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one instance](#42-the-life-cycle-of-one-instance)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Problem families and datasets](#5-problem-families-and-datasets)
 6. 🟢 [The KKT system and the IPM loop](#6-the-kkt-system-and-the-ipm-loop)
 7. 🟣 [The learned solvers](#7-the-learned-solvers)
@@ -133,6 +134,64 @@ flowchart LR
 | Timing | `src/ipm_lstm_attn/timing.py`, `bench.py` | Timing protocol and the pipeline benchmark |
 | CLI | `src/ipm_lstm_attn/cli.py` | The `ipm-lstm-attn` command |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses. The modules in `models/` need the `torch` extra.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>ipm-lstm-attn command"]
+    subgraph DATA["Data and config"]
+        CFG["config.py<br/>load_config, ExperimentConfig"]
+        REG["registry.py<br/>VARIANTS"]
+        DS["datasets.py<br/>generate, save, load, split_indices"]
+        PRB["problems.py<br/>Instance"]
+    end
+    subgraph CORE["Numerical core"]
+        IPM["ipm.py<br/>run, newton_system, take_step"]
+        KKT["kkt.py<br/>residual, jacobian, kkt_error"]
+        LIN["linsolve.py<br/>DirectSolver, CGNormalSolver"]
+        BE["baselines.py<br/>ExactIPMBackend, IpoptBackend"]
+    end
+    subgraph EVAL["Evaluation"]
+        EV["evaluate.py<br/>evaluate_solver"]
+        MET["metrics.py<br/>solution_metrics, paired_bootstrap"]
+        BEN["bench.py + timing.py<br/>benchmark, measure"]
+    end
+    subgraph TORCH["models/ (torch extra)"]
+        TR["train.py<br/>train, load_checkpoint"]
+        NET["nets.py<br/>LearnedNewtonSolver"]
+        AD["adapter.py<br/>LearnedSolver"]
+        AB["ablation.py<br/>run_ablation"]
+        PREC["precision.py<br/>precision_report"]
+    end
+
+    CLI --> CFG
+    CLI --> DS
+    CLI --> EV
+    CLI --> BE
+    CLI --> BEN
+    CLI --> TR
+    CLI --> AB
+    CLI --> PREC
+    CFG --> REG
+    DS --> PRB
+    EV --> IPM
+    EV --> BE
+    EV --> MET
+    BEN --> EV
+    BE --> IPM
+    IPM --> KKT
+    IPM --> LIN
+    KKT --> PRB
+    AB --> TR
+    AB --> EV
+    PREC --> EV
+    TR --> NET
+    TR --> IPM
+    AD --> NET
+    EV --> AD
+    NET --> REG
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -171,6 +230,14 @@ ipm-lstm-attn/
 ### 3.1 One change per variant
 Each variant in `registry.py` has one parent and one change. `lstm1` is the baseline. `lstm2` adds a layer. `lstm2_attn` adds attention. `lstm2_mask` adds the structure mask. `lstm2_gnn` replaces attention with message passing.
 
+```mermaid
+flowchart LR
+    L1["lstm1<br/>1 LSTM layer, no mixing block<br/>baseline"] -- "+ second LSTM layer" --> L2["lstm2<br/>2 layers, none"]
+    L2 -- "+ dense attention" --> LA["lstm2_attn<br/>2 layers, attention"]
+    LA -- "+ structure mask from J^T J" --> LM["lstm2_mask<br/>2 layers, masked_attention"]
+    L2 -- "message passing<br/>instead of attention" --> LG["lstm2_gnn<br/>2 layers, gnn"]
+```
+
 ### 3.2 Strict configuration
 Every config section is a pydantic model with `extra="forbid"`. An unknown key, for example `use_self_attention`, stops the run with an error. The CLI uses `parse_args`, so an unknown flag also stops the run.
 
@@ -196,24 +263,55 @@ The core package imports numpy, scipy and pydantic only. Torch, `cyipopt` and ma
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    CFG["TOML config (strict)"] --> GEN["generate: seeded dataset"]
+flowchart TD
+    CFG[/"TOML config (strict)"/] --> V{"load_config:<br/>unknown key?"}
+    V -- "yes" --> ERR[/"ValidationError, run stops"/]
+    V -- "no" --> GEN["generate: seeded dataset"]
     GEN --> SAVE["save once: .npz + manifest with SHA-256"]
-    SAVE --> LOAD["load: schema and hash check"]
+    SAVE --> DISK[("data/generated<br/>.npz + .json")]
+    DISK --> LOAD["load: schema and hash check"]
     LOAD --> SPLIT["split: train / val / test from one permutation"]
     SPLIT --> TRAIN["train each variant with each seed"]
-    TRAIN --> EVAL["evaluate on the test split"]
+    TRAIN --> CK[("results/checkpoints<br/>.pt + .json")]
+    CK --> EVAL["evaluate on the test split"]
     SPLIT --> CG["CG solver with the same inner budget"]
     CG --> EVAL
     EVAL --> REF["reference solve: f*"]
     EVAL --> WS["cold start and warm start of the back-end"]
     WS --> PAIR["paired bootstrap against lstm1"]
-    PAIR --> OUT["ablation JSON"]
+    PAIR --> OUT[/"ablation JSON"/]
     EVAL --> BENCH["timing protocol"]
     EVAL --> FP16["fp16 check"]
+    BENCH --> RJ[/"bench and precision JSON"/]
+    FP16 --> RJ
+    OUT --> HUMAN{{"HUMAN<br/>researcher reads the intervals<br/>and the seed spread before a claim"}}
+    RJ --> HUMAN
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one instance
+
+```mermaid
+stateDiagram-v2
+    state "Generated" as Generated
+    state "In one split" as Split
+    state "Reference f*" as Reference
+    state "Approximate IPM" as Approx
+    state "Approximate iterate" as Iterate
+    state "Cold and warm solves" as Solves
+    state "Report row" as Row
+    [*] --> Generated: generate, own b
+    Generated --> Split: split_indices
+    Split --> Reference: exact IPM to reference_tol
+    Reference --> Approx: cold-start iterate
+    Approx --> Approx: newton_system, solve, take_step
+    Approx --> Iterate: after outer_iters steps
+    Iterate --> Solves: back-end from cold start and from the iterate
+    Solves --> Row: solution_metrics, cold_iters, warm_iters, iters_saved
+    Row --> [*]
+```
 
 1. `generate` makes the shared matrices and one right-hand side `b` for the instance.
 2. `split_indices` puts the instance index into one split only.
@@ -226,11 +324,59 @@ flowchart TB
 9. The back-end solves the instance from the cold start and from the warm start.
 10. The report records the iterations of both solves and the iterations saved.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as ipm-lstm-attn CLI
+    participant DS as datasets.py
+    participant EV as evaluate.py
+    participant IPM as ipm.run
+    participant NS as Newton solver
+    participant BE as Back-end
+    participant FS as results folder
+
+    R->>CLI: ipm-lstm-attn evaluate --config --checkpoint
+    CLI->>CLI: load_dotenv, load_config, load_checkpoint
+    CLI->>DS: generate, save, load, split_indices
+    DS-->>CLI: Dataset and Split
+    CLI->>EV: evaluate_solver(ds, test, LearnedSolver, cfg.ipm, backend)
+    EV->>IPM: reference_objectives, exact IPM to reference_tol
+    IPM-->>EV: f* for each instance
+    EV->>IPM: run for outer_iters, stop_at_tol false
+    loop each outer step
+        IPM->>IPM: newton_system builds J and F
+        IPM->>NS: solve(J, F)
+        NS-->>IPM: dy
+        IPM->>IPM: take_step, kkt_error
+    end
+    IPM-->>EV: approximate iterates
+    EV->>BE: solve(inst) from the cold start
+    EV->>BE: solve(inst, y) from the warm start
+    BE-->>EV: SolveStats
+    EV-->>CLI: EvalReport
+    CLI->>FS: write the report JSON
+    CLI-->>R: summary: log10_kkt, rel_gap, iterations
+```
+
 ---
 
 ## 5. Problem families and datasets
 
 **Purpose.** Make reproducible instances with a known feasible interior.
+
+```mermaid
+flowchart LR
+    IN[/"family, n_var, n_eq,<br/>n_ineq, n_instances, seed"/] --> RNG["numpy default_rng(seed)"]
+    RNG --> F{"family"}
+    F -- "qp or nonconvex" --> M1["Q diagonal, p uniform,<br/>A and G normal,<br/>b uniform in -1 to 1"]
+    F -- "qcqp" --> M2["Q diagonal, p, A, G uniform,<br/>H_k diagonal,<br/>b uniform in -0.5 to 0.5"]
+    M1 --> C["c = b_max x row sums of abs(G pinv(A))<br/>+ qcqp term + 0.001"]
+    M2 --> C
+    C --> OUT[/"Dataset: shared arrays,<br/>one b per instance, meta"/]
+```
 
 | Input | Output |
 |---|---|
@@ -256,11 +402,47 @@ All families minimize `f(x)` subject to `A x = b` and `g(x) <= 0`.
 - A test checks strict feasibility of `pinv(A) b` for every generated instance of every family.
 - The split takes all arrays of an instance from one index. The prototype took the inequality data of the test split from the validation rows. This design makes that mistake impossible.
 
+```mermaid
+flowchart TD
+    DS[/"Dataset"/] --> SV{"datasets.save:<br/>.npz or .json exists?"}
+    SV -- "no" --> W["Write .npz through a .tmp file,<br/>write manifest with sha256"]
+    SV -- "yes, same sha256" --> NOOP["No change"]
+    SV -- "yes, other content" --> IMM[/"ImmutableDataError"/]
+    W --> LD["datasets.load"]
+    NOOP --> LD
+    LD --> CHK{"Manifest keys, arrays b or X,<br/>shapes, finite values, sha256 OK?"}
+    CHK -- "no" --> SE[/"SchemaError"/]
+    CHK -- "yes" --> RO["Arrays read-only"]
+    RO --> SP["split_indices:<br/>one seeded permutation"]
+    SP --> OUT[/"Disjoint train, val, test indexes"/]
+```
+
 ---
 
 ## 6. The KKT system and the IPM loop
 
 **Purpose.** Solve each instance with a primal-dual IPM and a pluggable Newton solver.
+
+```mermaid
+flowchart TD
+    IN[/"Instances of one size, solver,<br/>IPMSettings, optional y0"/] --> Y0{"y0 given?"}
+    Y0 -- "no" --> CS["initial_point: x = 0, eta = 1,<br/>s = max(-g(0), 1), lam = 0"]
+    Y0 -- "yes" --> WS["Warm start from y0"]
+    CS --> ACT{"Active instances left<br/>and step below max_iter?"}
+    WS --> ACT
+    ACT -- "no" --> OUT[/"IPMResult: y, iterations,<br/>converged, errors, history"/]
+    ACT -- "yes" --> NSY["newton_system for each active instance"]
+    NSY --> SOL["solver.solve(J, F) on the batch"]
+    SOL --> NF{"Non-finite dy?"}
+    NF -- "yes" --> ZERO["dy = 0, count nonfinite_steps"]
+    NF -- "no" --> STEP["take_step: fraction-to-boundary,<br/>primal and dual step lengths"]
+    ZERO --> STEP
+    STEP --> ERR["kkt_error of each instance,<br/>append to history"]
+    ERR --> TOL{"stop_at_tol and<br/>error at most tol?"}
+    TOL -- "yes" --> DONE["Instance done"]
+    TOL -- "no" --> ACT
+    DONE --> ACT
+```
 
 | Input | Output |
 |---|---|
@@ -270,6 +452,23 @@ The iterate is `y = [x, eta, s, lam]`. The residual for the barrier parameter `m
 
 ```
 F = [ grad f(x) + A' lam + Jg(x)' eta ;  g(x) + s ;  eta * s - mu ;  A x - b ]
+```
+
+`newton_system` builds one Newton system in these steps:
+
+```mermaid
+flowchart LR
+    Y[/"Instance, iterate y"/] --> MU["mu = sigma x<br/>complementarity"]
+    MU --> F["kkt.residual<br/>F at mu"]
+    Y --> J["kkt.jacobian<br/>J of the 4 blocks"]
+    J --> NC{"nonconvex and smallest<br/>eigenvalue below 1e-8?"}
+    NC -- "yes" --> SH["Shift the Hessian block<br/>by a multiple of I"]
+    NC -- "no" --> PC{"precondition?"}
+    SH --> PC
+    F --> PC
+    PC -- "yes" --> RE["row_equilibrate:<br/>each row to unit 2-norm"]
+    PC -- "no" --> OUT[/"J, F"/]
+    RE --> OUT
 ```
 
 **Procedure**
@@ -300,6 +499,24 @@ The KKT error is the largest of `max|grad L|`, `max|A x - b|`, `max|g(x) + s|` a
 
 **Purpose.** Return an approximate `dy` for a Newton system in a fixed number of inner steps.
 
+```mermaid
+flowchart TD
+    IN[/"J (B, N, N), F (B, N)"/] --> SC["f = F / norm(F)"]
+    SC --> INIT["dy = 0, LSTM states = 0,<br/>best = dy"]
+    INIT --> FEAT["Token features:<br/>dy and grad of 0.5 norm(J dy + f)^2"]
+    FEAT --> BK{"Variant block"}
+    BK -- "none" --> LSTM["Stacked LSTMCell,<br/>dropout between layers"]
+    BK -- "attention or masked_attention" --> AT["embed + AttentionBlock<br/>mask from structure_mask if masked"]
+    BK -- "gnn" --> GN["embed + MessagePassingBlock<br/>tokens to rows to tokens"]
+    AT --> LSTM
+    GN --> LSTM
+    LSTM --> HD["dy = dy - head(h)"]
+    HD --> RS["Residual, loss += mean / inner_steps,<br/>keep best dy per instance"]
+    RS --> MORE{"inner_steps done?"}
+    MORE -- "no" --> FEAT
+    MORE -- "yes" --> OUT[/"best x norm(F), loss,<br/>relative residual"/]
+```
+
 | Input | Output |
 |---|---|
 | `J` (B, N, N) and `F` (B, N) | `dy` (B, N), the training loss, the relative residual of `dy` |
@@ -329,6 +546,26 @@ The KKT error is the largest of `max|grad L|`, `max|A x - b|`, `max|g(x) + s|` a
 - Early stop watches the mean log10 KKT error on the validation split after the outer budget.
 - A checkpoint holds the weights and the model config. `load_checkpoint` uses `weights_only=True`.
 
+`models/train.py` trains one variant with one seed inside the IPM loop:
+
+```mermaid
+flowchart TD
+    S["set_seed(train.seed)<br/>before build_model"] --> E["Epoch: permute the train split"]
+    E --> MB["Mini-batch: cold-start iterates"]
+    MB --> OS["Outer step: newton_system<br/>J, F as float32 tensors"]
+    OS --> FW["model(J, F): dy, loss"]
+    FW --> OPT["Adam step,<br/>clip_grad_norm grad_clip"]
+    OPT --> TS["take_step with the detached dy,<br/>non-finite entries set to 0"]
+    TS --> NX{"outer_iters done?"}
+    NX -- "no" --> OS
+    NX -- "yes, next batch" --> MB
+    NX -- "yes, epoch done" --> VAL["validation_score:<br/>mean log10 KKT on val"]
+    VAL --> ES{"No gain for<br/>patience epochs?"}
+    ES -- "no" --> E
+    ES -- "yes, or last epoch" --> BEST["Load the best weights"]
+    BEST --> CK[/"save_checkpoint: .pt with weights and<br/>model config, .json with history"/]
+```
+
 ---
 
 ## 8. The evaluation, ablation and timing rules
@@ -344,6 +581,18 @@ The KKT error is the largest of `max|grad L|`, `max|A x - b|`, `max|g(x) + s|` a
 | `cold_iters`, `warm_iters`, `iters_saved` | Back-end iterations from the cold start and from the warm start |
 | `cold_s`, `warm_s`, `warm_converged` | Back-end times and the convergence flag |
 
+```mermaid
+flowchart LR
+    IN[/"Dataset, test indexes,<br/>Newton solver, back-end"/] --> FS{"f_star given?"}
+    FS -- "no" --> REF["reference_objectives:<br/>exact IPM to reference_tol"]
+    FS -- "yes" --> AP["approximate: IPM with the solver<br/>for outer_iters steps"]
+    REF --> AP
+    AP --> SM["solution_metrics:<br/>rel_gap, violations, KKT error"]
+    SM --> BE["back-end solve:<br/>cold start, then warm start"]
+    BE --> REC["Record per instance"]
+    REC --> SUM[/"EvalReport: summary,<br/>kkt_history, records"/]
+```
+
 **Ablation.**
 
 1. Train every variant with every seed on the same split.
@@ -352,6 +601,23 @@ The KKT error is the largest of `max|grad L|`, `max|A x - b|`, `max|g(x) + s|` a
 4. Mark a difference as significant only if the interval excludes zero.
 5. Report the standard deviation of the seed means.
 6. Evaluate `cg<inner_steps>` once as the non-learned reference with the same inner budget.
+
+```mermaid
+flowchart TD
+    CFG[/"Config: ablation.variants,<br/>ablation.seeds, baseline"/] --> FS["reference_objectives on the test split<br/>one time"]
+    FS --> LOOP["For each variant and each seed:<br/>train, then evaluate_solver"]
+    LOOP --> AVG["Mean over the seeds<br/>for each test instance"]
+    LOOP --> SD["Seed means, then seed_std"]
+    FS --> CG["evaluate_solver with<br/>CGNormalSolver(inner_steps)"]
+    AVG --> PB["paired_bootstrap against the baseline<br/>for warm_iters, log10_kkt, rel_gap"]
+    CG --> PB
+    PB --> SIG{"Interval excludes 0?"}
+    SIG -- "yes" --> S1["significant true"]
+    SIG -- "no" --> S0["significant false"]
+    S1 --> OUT[/"ablation JSON"/]
+    S0 --> OUT
+    SD --> OUT
+```
 
 **Timing protocol.**
 
@@ -364,7 +630,34 @@ The KKT error is the largest of `max|grad L|`, `max|A x - b|`, `max|g(x) + s|` a
 
 The pipeline time is the per-instance approximate IPM time plus the per-instance warm-start time. Each row is a median over `repeats` calls after `warmup` calls. The report records the Python, numpy and torch versions, the thread count and the device.
 
+```mermaid
+flowchart LR
+    IN[/"Test instances, up to max_instances"/] --> M1["measure: approximate IPM,<br/>per_instance, batch 1"]
+    IN --> M2["measure: approximate IPM,<br/>batched, batch_size"]
+    IN --> M3["measure: back-end cold,<br/>per_instance"]
+    IN --> M4["measure: back-end warm,<br/>per_instance"]
+    M1 --> P["pipeline = M1 + M4<br/>per instance"]
+    M4 --> P
+    P --> OUT[/"bench JSON: rows, pipeline,<br/>cold time, iterations, environment"/]
+    M2 --> OUT
+    M3 --> OUT
+```
+
 **fp16 check.** `precision-check` stores each weight as float16, reads it back as float32 and runs the same evaluation. The IPM residuals stay in float64. The report gives the change in log10 KKT error and in warm-start iterations.
+
+```mermaid
+flowchart LR
+    CK[/"Checkpoint model, float32"/] --> RT["fp16_roundtrip:<br/>weight to half, back to float32"]
+    CK --> E32["evaluate_solver<br/>float32 model"]
+    RT --> E16["evaluate_solver<br/>round-trip model"]
+    FS["reference_objectives<br/>one time"] --> E32
+    FS --> E16
+    E32 --> D["Differences per instance:<br/>log10_kkt, warm_iters"]
+    E16 --> D
+    RT --> W["max_abs_weight_change,<br/>bytes_fp32, bytes_fp16"]
+    D --> OUT[/"precision JSON"/]
+    W --> OUT
+```
 
 ---
 
@@ -433,6 +726,27 @@ ipm-lstm-attn evaluate --config configs/qp_small.toml --checkpoint <file.pt> --b
 
 # plot the KKT error history of evaluate reports (plot extra)
 ipm-lstm-attn plot results/qp_small_cg10_test.json --out results/kkt.png
+```
+
+Each command with `--config` prepares the data in the same steps before it does its own work:
+
+```mermaid
+flowchart LR
+    ENV["load_dotenv<br/>.env, set variables win"] --> CFG["load_config<br/>strict TOML"]
+    CFG --> PD["prepare_dataset:<br/>generate, save once, load, split_indices"]
+    PD --> CMD{"Command"}
+    CMD -- "baseline" --> B["evaluate_solver<br/>direct or cg"]
+    CMD -- "train" --> T["train, checkpoint"]
+    CMD -- "evaluate" --> E["load_checkpoint,<br/>evaluate_solver"]
+    CMD -- "ablate" --> A["run_ablation"]
+    CMD -- "bench" --> BN["benchmark"]
+    CMD -- "precision-check" --> P["precision_report"]
+    B --> OUT[("results/<br/>JSON reports, checkpoints/")]
+    T --> OUT
+    E --> OUT
+    A --> OUT
+    BN --> OUT
+    P --> OUT
 ```
 
 ### 10.4 Environment variables
